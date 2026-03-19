@@ -1,30 +1,323 @@
--- Insert an HR user
-INSERT INTO hr_users (name, email, password_hash) VALUES ('Alice HR', 'alice@example.com', 'hashed_pw_example');
+-- =============================================================================================
+--  FILE: backend/db/schema.sql
+-- =============================================================================================
+--
+--  PURPOSE OF THIS FILE:
+-- ---------------------------------------------------------------------------------------------
+-- This SQL script sets up the **entire PostgreSQL database** for the Resume Screening System.
+--
+-- It:
+--    Creates all required tables (HRs, Jobs, Candidates, Skills, etc.)
+--    Defines relationships (foreign keys)
+--    Inserts sample data for testing the backend and frontend
+--
+-- You’ll use this once to initialize your PostgreSQL database before running FastAPI.
+--
+-- ---------------------------------------------------------------------------------------------
+--  WINDOWS FILE PATH (suggested):
+--   C:\pbldbms\backend\db\schema.sql
+--
+--  HOW TO RUN THIS FILE (Windows PowerShell):
+--   1️ Open PowerShell
+--   2️ Log in as PostgreSQL superuser:
+--         psql -U postgres
+--   3️ (Optional) Create a new user and database:
+--         CREATE USER resume_user WITH PASSWORD 'Resume123';
+--         CREATE DATABASE resume_db;
+--         GRANT ALL PRIVILEGES ON DATABASE resume_db TO resume_user;
+--   4️ Connect to your database:
+--         \c resume_db
+--   5️ Run this script:
+--         \i 'C:\\pbldbms\\backend\\db\\schema.sql'
+--   6️ Check all tables:
+--         \dt
+--   7️ Exit:
+--         \q
+--
+-- ---------------------------------------------------------------------------------------------
+--  DATABASE ENGINE:
+--   PostgreSQL (Recommended version: 14+)
+--
+-- ---------------------------------------------------------------------------------------------
+--  CONNECTION STRING (for backend .env or config.py):
+--   postgresql://resume_user:Resume123@localhost:5432/resume_db
+--
+-- =============================================================================================
 
--- Canonical skills
-INSERT INTO skills (skill_name, canonical_name) VALUES
-('python', 'Python'),
-('sql', 'SQL'),
-('postgresql', 'PostgreSQL'),
-('docker', 'Docker'),
-('data-structures', 'Data Structures');
 
--- Two sample candidates
+
+-- =============================================================================================
+-- 🧹 STEP 1️: CLEAN OLD DATA SAFELY
+-- =============================================================================================
+-- These DROP TABLE commands remove any old versions of the tables before recreating them.
+-- CASCADE ensures that related foreign key constraints are also removed.
+-- This prevents “table already exists” errors when re-running the script.
+-- ---------------------------------------------------------------------------------------------
+DROP TABLE IF EXISTS rankings CASCADE;
+DROP TABLE IF EXISTS job_skills CASCADE;
+DROP TABLE IF EXISTS resume_skills CASCADE;
+DROP TABLE IF EXISTS resumes CASCADE;
+DROP TABLE IF EXISTS jobs CASCADE;
+DROP TABLE IF EXISTS skills CASCADE;
+DROP TABLE IF EXISTS candidates CASCADE;
+DROP TABLE IF EXISTS hr_users CASCADE;
+
+
+
+-- =============================================================================================
+--  STEP 2️: HR USERS TABLE
+-- =============================================================================================
+-- Stores HR/recruiter accounts who post jobs or view results.
+-- Each HR has login info (email + password_hash).
+-- Passwords are stored as hashes for security.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE hr_users (
+  hr_id SERIAL PRIMARY KEY,             -- Auto-incrementing unique HR ID
+  name TEXT NOT NULL,                   -- HR’s full name
+  email TEXT NOT NULL UNIQUE,           -- Must be unique (used for login)
+  password_hash TEXT NOT NULL,          -- Encrypted password
+  created_at TIMESTAMPTZ DEFAULT now()  -- Timestamp when HR was created
+);
+
+
+
+-- =============================================================================================
+--  STEP 3️: CANDIDATES TABLE
+-- =============================================================================================
+-- Stores candidate personal details (linked later with resumes).
+-- Each resume belongs to one candidate.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE candidates (
+  candidate_id SERIAL PRIMARY KEY,
+  full_name TEXT,
+  email TEXT UNIQUE,
+  phone TEXT,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+
+
+-- =============================================================================================
+--  STEP 4️: SKILLS TABLE
+-- =============================================================================================
+-- Holds all unique skills (like “Python”, “FastAPI”, “Docker”).
+-- ML and NLP pipelines match these against resumes and job descriptions.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE skills (
+  skill_id SERIAL PRIMARY KEY,
+  skill_name TEXT UNIQUE NOT NULL,
+  canonical_name TEXT,                  -- Normalized lowercase version (e.g., “machine learning”)
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Index for faster case-insensitive skill lookups
+CREATE INDEX idx_skills_lower_name ON skills (lower(skill_name));
+
+
+
+-- =============================================================================================
+--  STEP 5️: JOBS TABLE
+-- =============================================================================================
+-- Stores all job openings created by HRs.
+-- Each job belongs to an HR and can have many required skills.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE jobs (
+  job_id SERIAL PRIMARY KEY,
+  hr_id INTEGER REFERENCES hr_users(hr_id) ON DELETE SET NULL,
+  title TEXT NOT NULL,                  -- e.g., “ML Engineer”
+  description TEXT,                     -- Job responsibilities, etc.
+  created_at TIMESTAMPTZ DEFAULT now(),
+  embedding JSONB                       -- ML-generated vector for job description (used in similarity ranking)
+);
+
+
+
+-- =============================================================================================
+--  STEP 6️: RESUMES TABLE
+-- =============================================================================================
+-- Each candidate may upload multiple resumes.
+-- Each resume may be linked to a specific job or be general.
+-- ML/NLP pipelines parse, extract text, and embed it here.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE resumes (
+  resume_id SERIAL PRIMARY KEY,
+  candidate_id INTEGER REFERENCES candidates(candidate_id) ON DELETE CASCADE,
+  job_id INTEGER REFERENCES jobs(job_id) ON DELETE SET NULL,
+  filename TEXT,                        -- e.g., “resume_pratyush.pdf”
+  upload_path TEXT,                     -- file path (e.g., “/uploads/resume_pratyush.pdf”)
+  uploaded_at TIMESTAMPTZ DEFAULT now(),
+  raw_text TEXT,                        -- extracted plain text of resume
+  parsed_json JSONB,                    -- structured JSON (skills, contact info, etc.)
+  embedding JSONB                       -- ML embedding (vectorized form)
+);
+
+
+
+-- =============================================================================================
+--  STEP 7️: RESUME_SKILLS TABLE (Many-to-Many)
+-- =============================================================================================
+-- Maps resumes ↔ skills, with a confidence score from the ML extractor.
+-- E.g., resume_id=1 may have skill_id=2 (Python) with confidence=0.97.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE resume_skills (
+  id SERIAL PRIMARY KEY,
+  resume_id INTEGER REFERENCES resumes(resume_id) ON DELETE CASCADE,
+  skill_id INTEGER REFERENCES skills(skill_id) ON DELETE CASCADE,
+  confidence DOUBLE PRECISION           -- 0.0–1.0, how confident ML model is about the skill
+);
+
+
+
+-- =============================================================================================
+--  STEP 8️: JOB_SKILLS TABLE (Many-to-Many)
+-- =============================================================================================
+-- Links job postings to their required skills.
+-- E.g., Job 1 may require (Python, ML, Docker).
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE job_skills (
+  id SERIAL PRIMARY KEY,
+  job_id INTEGER REFERENCES jobs(job_id) ON DELETE CASCADE,
+  skill_id INTEGER REFERENCES skills(skill_id) ON DELETE CASCADE,
+  required_level INTEGER DEFAULT 1      -- Optional numeric level (1–5) or priority weight
+);
+
+
+
+-- =============================================================================================
+--  STEP 9️: RANKINGS TABLE
+-- =============================================================================================
+-- Stores final ranking scores (ML/NLP similarity results) between jobs and resumes.
+-- Each job-resume pair has one unique score.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE rankings (
+  ranking_id SERIAL PRIMARY KEY,
+  job_id INTEGER REFERENCES jobs(job_id) ON DELETE CASCADE,
+  resume_id INTEGER REFERENCES resumes(resume_id) ON DELETE CASCADE,
+  score DOUBLE PRECISION,               -- final ML score (0.0–1.0)
+  created_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE (job_id, resume_id)            -- prevent duplicate ranking for same job-resume pair
+);
+
+
+
+-- =============================================================================================
+--  STEP : INSERT SAMPLE DATA (for testing backend + frontend)
+-- =============================================================================================
+
+--  HR USERS
+INSERT INTO hr_users (name, email, password_hash) VALUES
+('Alice HR', 'alice@company.com', 'hashed_alice123'),
+('Bob Recruiter', 'bob@company.com', 'hashed_bob456');
+
+--  CANDIDATES
 INSERT INTO candidates (full_name, email, phone) VALUES
-('Ravi Kumar', 'ravi.kumar@example.com', '+91-9876543210'),
-('Sita Sharma', 'sita.sharma@example.com', '+91-9123456780');
+('Pratyush Kandari', 'pratyush@example.com', '+91-90000-00001'),
+('Ravi Sharma', 'ravi@example.com', '+91-90000-00002'),
+('Kavya Iyer', 'kavya@example.com', '+91-90000-00003');
 
--- Two sample resumes (raw_text small examples)
-INSERT INTO resumes (candidate_id, filename, upload_path, raw_text, parsed_json, embedding) VALUES
-(1, 'ravi_cv.docx', '/path/to/ravi_cv.docx', 'Ravi Kumar\nEmail: ravi.kumar@example.com\nSkills: Python, SQL, PostgreSQL\nExperience: 2 years', '{"parsed": {"name":"Ravi Kumar","email":"ravi.kumar@example.com","skills":["python","sql","postgresql"]}}', '[]'::jsonb),
-(2, 'sita_cv.docx', '/path/to/sita_cv.docx', 'Sita Sharma\nEmail: sita.sharma@example.com\nSkills: Python, Data Structures\nExperience: Internship', '{"parsed": {"name":"Sita Sharma","email":"sita.sharma@example.com","skills":["python","data-structures"]}}', '[]'::jsonb);
+--  SKILLS
+INSERT INTO skills (skill_name, canonical_name) VALUES
+('Python', 'python'),
+('AI', 'ai'),
+('ML', 'ml'),
+('SQL', 'sql'),
+('FastAPI', 'fastapi'),
+('Docker', 'docker'),
+('PostgreSQL', 'postgresql');
 
--- Sample job
-INSERT INTO jobs (hr_id, title, description, embedding) VALUES
-(1, 'Junior DB Developer', 'Looking for a junior DB dev with SQL/Postgres and Python scripting.', '[]'::jsonb);
+--  JOBS
+INSERT INTO jobs (hr_id, title, description)
+VALUES
+(1, 'Machine Learning Engineer', 'Looking for ML Engineer skilled in Python, FastAPI, Docker'),
+(2, 'Backend Developer', 'Experience with SQL, PostgreSQL, FastAPI, Docker');
 
--- Link job skills
-INSERT INTO job_skills (job_id, skill_id, required_level) VALUES
-(1, (SELECT skill_id FROM skills WHERE skill_name='sql'), 2),
-(1, (SELECT skill_id FROM skills WHERE skill_name='postgresql'), 2),
-(1, (SELECT skill_id FROM skills WHERE skill_name='python'), 1);
+--  JOB SKILLS
+INSERT INTO job_skills (job_id, skill_id)
+SELECT 1, skill_id FROM skills WHERE skill_name IN ('Python', 'AI', 'ML', 'FastAPI', 'Docker');
+INSERT INTO job_skills (job_id, skill_id)
+SELECT 2, skill_id FROM skills WHERE skill_name IN ('SQL', 'PostgreSQL', 'FastAPI', 'Docker');
+
+--  RESUMES
+INSERT INTO resumes (candidate_id, job_id, filename, upload_path, raw_text, parsed_json)
+VALUES
+(1, 1, 'resume_pratyush.pdf', '/uploads/resume_pratyush.pdf', 'Pratyush resume content',
+ '{"skills":["Python","AI","ML"],"email":"pratyush@example.com"}'),
+(2, 2, 'resume_ravi.pdf', '/uploads/resume_ravi.pdf', 'Ravi resume content',
+ '{"skills":["SQL","Docker","PostgreSQL"],"email":"ravi@example.com"}'),
+(3, NULL, 'resume_kavya.pdf', '/uploads/resume_kavya.pdf', 'Kavya resume content',
+ '{"skills":["Python","AI"],"email":"kavya@example.com"}');
+
+-- 🧩 RESUME_SKILLS
+INSERT INTO resume_skills (resume_id, skill_id, confidence)
+SELECT 1, skill_id, 0.95 FROM skills WHERE skill_name IN ('Python','AI','ML');
+INSERT INTO resume_skills (resume_id, skill_id, confidence)
+SELECT 2, skill_id, 0.90 FROM skills WHERE skill_name IN ('SQL','Docker','PostgreSQL');
+INSERT INTO resume_skills (resume_id, skill_id, confidence)
+SELECT 3, skill_id, 0.85 FROM skills WHERE skill_name IN ('Python','AI');
+
+--  RANKINGS
+INSERT INTO rankings (job_id, resume_id, score) VALUES
+(1, 1, 0.92),
+(1, 3, 0.75),
+(2, 2, 0.88);
+
+
+
+-- =============================================================================================
+--  HOW THIS DATABASE FITS IN THE PROJECT
+-- =============================================================================================
+--
+-- 🔹 Backend (FastAPI)
+--   - Connects to this database using SQLAlchemy.
+--   - Reads job, resume, and skill data for ML ranking.
+--   - Updates "rankings" table with model predictions.
+--
+-- 🔹 Frontend (React + Axios)
+--   - Calls backend endpoints (e.g. /api/jobs, /api/resumes/upload)
+--   - Displays candidates and scores fetched from this schema.
+--
+-- 🔹 ML/NLP Layer
+--   - Extracts skills, creates embeddings (JSONB vectors), inserts into "embedding" fields.
+--
+-- =============================================================================================
+
+
+-- =============================================================================================
+--  WINDOWS-SPECIFIC TIPS
+-- =============================================================================================
+--
+-- ▶ 1️ Run PostgreSQL Service:
+--   Open Windows Search → "pgAdmin" or "SQL Shell (psql)".
+--
+-- ▶ 2️ To connect manually:
+--     psql -U postgres -h localhost -p 5432
+--
+-- ▶ 3️ To execute this schema:
+--     \i 'C:\\pbldbms\\backend\\db\\schema.sql'
+--
+-- ▶ 4️ To verify:
+--     \dt                     → lists tables
+--     SELECT * FROM hr_users; → shows sample data
+--
+-- ▶ 5️ To reset everything:
+--     Rerun this script (it drops old tables and recreates fresh ones)
+--
+-- ▶ 6️ Backup data:
+--     pg_dump -U postgres -d resume_db -f backup.sql
+--
+-- =============================================================================================
+--
+--  SUMMARY (BEGINNER-FRIENDLY):
+-- ---------------------------------------------------------------------------------------------
+-- ✔ This SQL file sets up the **entire database** structure for your ML Resume Screening System.
+-- ✔ It works perfectly on Windows with PostgreSQL.
+-- ✔ You only need to run it once when setting up your environment.
+-- ✔ FastAPI will connect to these tables automatically when the app starts.
+-- ✔ Re-running this file resets your database to clean test data.
+--
+-- After running:
+--   - Go to FastAPI docs: http://127.0.0.1:8000/docs
+--   - Go to frontend:     http://localhost:5173
+--
+-- and test end-to-end resume screening with real .doc/.pdf uploads!
+-- =============================================================================================
